@@ -6,20 +6,15 @@ This script leverages Microsoft Graph PowerShell commands to report on Condition
 The account used to run this script must be delegated read-only permissions to CAPs as well as other Directory objects.
 This script will categorize tenant CAPs based on how they fit into Microsoft best practices.
 .NOTES
-Version: 1.1
-Updated: 20240801
+Version: 1.2
+Updated: 20240821
 Author: Brandon Colley
 Email: ColleyBrandon@pm.me
 #>
 
 # Required Graph permissions to run this script.
 $graphScope = @(
-'DeviceManagementConfiguration.Read.All', #Required to run: Get-MgDeviceManagementDeviceConfiguration
-'Directory.Read.All', # User, Group, and Device queries
-'IdentityProvider.Read.All', #Required to run: Get-MgIdentityProvider
-'Policy.Read.All', #Required to run: Get-MgIdentityConditionalAccessPolicy
-'AuditLog.Read.All', #Required to run: Get-MgReportAuthenticationMethodUserRegistrationDetail
-'UserAuthenticationMethod.Read.All' # Required to run: Get-MgUserAuthenticationMethod    
+'Policy.Read.All' #Required to run: Get-MgIdentityConditionalAccessPolicy
 )
 
 # Prompt for and authenticate to tenant
@@ -81,6 +76,48 @@ ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     }
 } 
 
+function Get-AdminRoleConfig{
+    param(
+        $CAPtargetingRoles
+    )
+    $default14Roles = @(
+        '62e90394-69f5-4237-9190-012177145e10',
+        '194ae4cb-b126-40b2-bd5b-6091b380977d',
+        'f28a1f50-f6e7-4571-818b-6a12f2af6b6c',
+        '29232cdf-9323-42fd-ade2-1d097af3e4de',
+        'b1be1c3e-b65d-4f19-8427-f6fa0d97feb9',
+        '729827e3-9c14-49f7-bb1b-9608f156bbb8',
+        'b0f54661-2d74-4c50-afa3-1ec803f12efe',
+        'fe930be7-5e62-47db-91af-98c3a49a38b1',
+        'c4e39bd9-1100-46d3-8c65-fb160da0071f',
+        '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3',
+        '158c047a-c907-4556-b7ef-446551a6b5f7',
+        '966707d0-3269-4727-9be2-8c3a10f19b9d',
+        '7be44c8a-adaf-4e2a-84d6-ab2649e08a13',
+        'e8611ab8-c189-46e8-94e1-60213ab1f814'
+    )
+    $defaultCount = 0
+    $nonDefaultCount = 0
+    $includeCount = 0
+    $includeCount = $CAPtargetingRoles.Conditions.Users.IncludeRoles.count
+    
+    ForEach ($role in ($CAPtargetingRoles.Conditions.Users.IncludeRoles)){
+        if($default14Roles -contains $role){
+            $defaultCount++
+        }
+        else{
+            $nonDefaultCount++
+        }
+    }
+    $return = [PSCustomObject]@{
+        CAP_Name = $CAPtargetingRoles.DisplayName
+        Total_Roles = $includeCount
+        Default_Roles = "$defaultCount/14"
+        Additional_Roles = $nonDefaultCount
+    }
+    $return
+}
+
 Write-Host -ForegroundColor DarkYellow "Categorize Policies:"
 Write-Host -ForegroundColor Green "`nPolicies that block Legacy Authentication"
 $CAPBlockLegacyAccess.DisplayName
@@ -100,3 +137,9 @@ Write-Host -ForegroundColor Green "`nPolicies that restrict access to the admin 
 $CAPRestrictAdminPortal.DisplayName
 Write-Host -ForegroundColor Green "`nPolicies that require MFA for device join or registration"
 $CAPMFAforDeviceJoin.DisplayName
+
+Write-Host -ForegroundColor DarkYellow "`nChecking for Misconfigured CAPs"
+Write-Host -ForegroundColor Green "`nMFA Policies that target Admin roles should include the 14 default roles and any other role the environment deems privileged."
+ForEach ($adminCAP in $CAPMFAforAdmins){
+    Get-AdminRoleConfig $adminCAP
+}
