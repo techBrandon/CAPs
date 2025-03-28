@@ -39,12 +39,17 @@ $ConditionalAccessPolicyArray| Format-Table DisplayName,State,CreatedDateTime,Mo
 [array]$CAPBlockLegacyAccess = @()
 [array]$CAPMFAforAdmins = @()
 [array]$CAPMFAforUsers = @()
+[array]$CAPMFAforGuests = @()
 [array]$CAPRisk = @()
 [array]$CAPAppProtection = @()
 [array]$CAPDeviceCompliance = @()
 [array]$CAPUsingLocations = @()
 [array]$CAPRestrictAdminPortal = @()
 [array]$CAPMFAforDeviceJoin = @()
+[array]$CAPBlockAuthFlow = @()
+[array]$CAPTargetAllResources = @()
+[array]$CAPSecureRegistration = @()
+[array]$CAPAuthStrength = @()
 
 ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     if((($CAPolicy.Conditions.ClientAppTypes -contains 'exchangeActiveSync') -or ($CAPolicy.Conditions.ClientAppTypes -contains 'other')) -and (($CAPolicy.Conditions.ClientAppTypes -notcontains 'browser') -and ($CAPolicy.Conditions.ClientAppTypes -notcontains 'mobileAppsAndDesktopClients')) -and ($CAPolicy.GrantControls.BuiltInControls -eq 'block')){
@@ -55,6 +60,9 @@ ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     }
     if((($CAPolicy.GrantControls.BuiltInControls -contains 'mfa') -or ($CAPolicy.GrantControls.AuthenticationStrength.Id)) -and (($CAPolicy.Conditions.Users.IncludeUsers -contains 'All') -or ($CAPolicy.Conditions.Users.IncludeGroups))){
         $CAPMFAforUsers += $CAPolicy
+    }
+    if((($CAPolicy.GrantControls.BuiltInControls -contains 'mfa') -or ($CAPolicy.GrantControls.AuthenticationStrength.Id)) -and ($CAPolicy.Conditions.Users.IncludeGuestsOrExternalUsers.GuestOrExternalUserTypes)){
+        $CAPMFAforGuests += $CAPolicy
     }
     if(($CAPolicy.Conditions.SignInRiskLevels) -or ($CAPolicy.Conditions.UserRiskLevels)){
         $CAPRisk += $CAPolicy
@@ -74,11 +82,23 @@ ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     if($CAPolicy.Conditions.Applications.IncludeUserActions -like '*registerdevice*'){
         $CAPMFAforDeviceJoin += $CAPolicy
     }
+    if($CAPolicy.Conditions.AdditionalProperties.Values.Values -and $CAPolicy.GrantControls.BuiltInControls -eq 'block'){
+        $CAPBlockAuthFlow += $CAPolicy
+    }
+    if(($CAPolicy.Conditions.Applications.IncludeApplications -eq 'All') -and ($CAPolicy.Conditions.Users.IncludeUsers -contains 'All')){
+        $CAPTargetAllResources += $CAPolicy
+    }
+    if($CAPolicy.Conditions.Applications.IncludeUserActions -like '*registersecurityinfo*'){
+        $CAPSecureRegistration += $CAPolicy
+    }
+    if($CAPolicy.GrantControls.AuthenticationStrength.Id){
+        $CAPAuthStrength += $CAPolicy
+    }
 } 
 
 function Get-AdminRoleConfig{
     param(
-        $CAPtargetingRoles
+        $CAPStargetingRoles
     )
     $default14Roles = @(
         '62e90394-69f5-4237-9190-012177145e10',
@@ -96,50 +116,87 @@ function Get-AdminRoleConfig{
         '7be44c8a-adaf-4e2a-84d6-ab2649e08a13',
         'e8611ab8-c189-46e8-94e1-60213ab1f814'
     )
-    $defaultCount = 0
-    $nonDefaultCount = 0
-    $includeCount = 0
-    $includeCount = $CAPtargetingRoles.Conditions.Users.IncludeRoles.count
-    
-    ForEach ($role in ($CAPtargetingRoles.Conditions.Users.IncludeRoles)){
-        if($default14Roles -contains $role){
-            $defaultCount++
+    ForEach ($policy in $CAPStargetingRoles){
+        $defaultCount = 0
+        $nonDefaultCount = 0
+        $includeCount = 0
+        $includeCount = $policy.Conditions.Users.IncludeRoles.count
+        
+        ForEach ($role in ($policy.Conditions.Users.IncludeRoles)){
+            if($default14Roles -contains $role){
+                $defaultCount++
+            }
+            else{
+                $nonDefaultCount++
+            }
         }
-        else{
-            $nonDefaultCount++
+        $returnAdmin = [PSCustomObject]@{
+            CAP_Name = $policy.DisplayName
+            Total_Roles = $includeCount
+            Default_Roles = "$defaultCount/14"
+            Additional_Roles = $nonDefaultCount
         }
+        $returnAdmin
     }
-    $return = [PSCustomObject]@{
-        CAP_Name = $CAPtargetingRoles.DisplayName
-        Total_Roles = $includeCount
-        Default_Roles = "$defaultCount/14"
-        Additional_Roles = $nonDefaultCount
+}
+
+function Compare-AuthStrength{
+    param(
+        $CAPSusingAuthStrength
+    )
+    $strongMFA = @(
+        'fido2',
+        'windowsHelloForBusiness',
+        'x509CertificateMultiFactor',
+        'deviceBasedPush'
+    )
+    ForEach ($policy in $CAPSusingAuthStrength){
+        $passFail = "Pass"
+        ForEach ($authMethod in ($policy.GrantControls.AuthenticationStrength.AllowedCombinations)){
+            if($strongMFA -notcontains $authMethod){
+                $passFail = "Fail"
+            }
+        }
+        $returnStrength = [PSCustomObject]@{
+            CAP_Name = $policy.DisplayName
+            Number_of_Methods = $policy.GrantControls.AuthenticationStrength.AllowedCombinations.count
+            Status = $passFail
+        }
+        $returnStrength
     }
-    $return
 }
 
 Write-Host -ForegroundColor DarkYellow "Categorize Policies:"
-Write-Host -ForegroundColor Green "`nPolicies that block Legacy Authentication"
+Write-Host -ForegroundColor Green "`nPolicies that Block Legacy Authentication"
 $CAPBlockLegacyAccess.DisplayName
 Write-Host -ForegroundColor Green "`nPolicies that enforce MFA for Administrators"
 $CAPMFAforAdmins.DisplayName
 Write-Host -ForegroundColor Green "`nPolicies that enforce MFA for Users"
 $CAPMFAforUsers.DisplayName
-Write-Host -ForegroundColor Green "`nPolicies that affect risky users"
+Write-Host -ForegroundColor Green "`nPolicies that enforce MFA for Guests"
+$CAPMFAforGuests.DisplayName
+Write-Host -ForegroundColor Green "`nPolicies that affect Risky Users"
 $CAPRisk.DisplayName
-Write-Host -ForegroundColor Green "`nPolicies that require approved client or app protection"
+Write-Host -ForegroundColor Green "`nPolicies that require Approved Client or App Protection"
 $CAPAppProtection.DisplayName
-Write-Host -ForegroundColor Green "`nPolicies that require device compliance"
+Write-Host -ForegroundColor Green "`nPolicies that require Device Compliance"
 $CAPDeviceCompliance.DisplayName
-Write-Host -ForegroundColor Green "`nPolicies that restrict access by location"
+Write-Host -ForegroundColor Green "`nPolicies that restrict access by Location"
 $CAPUsingLocations.DisplayName
-Write-Host -ForegroundColor Green "`nPolicies that restrict access to the admin portal"
+Write-Host -ForegroundColor Green "`nPolicies that restrict access to the Admin Portal"
 $CAPRestrictAdminPortal.DisplayName
-Write-Host -ForegroundColor Green "`nPolicies that require MFA for device join or registration"
+Write-Host -ForegroundColor Green "`nPolicies that require MFA for Device Join"
 $CAPMFAforDeviceJoin.DisplayName
+Write-Host -ForegroundColor Green "`nPolicies that block Authentication Flows"
+$CAPBlockAuthFlow.DisplayName
+Write-Host -ForegroundColor Green "`nPolicies that target All Resources and All Users"
+$CAPTargetAllResources.DisplayName
+Write-Host -ForegroundColor Green "`nPolicies that secure Secuirity Info Registration"
+$CAPSecureRegistration.DisplayName
 
 Write-Host -ForegroundColor DarkYellow "`nChecking for Misconfigured CAPs"
 Write-Host -ForegroundColor Green "`nMFA Policies that target Admin roles should include the 14 default roles and any other role the environment deems privileged."
-ForEach ($adminCAP in $CAPMFAforAdmins){
-    Get-AdminRoleConfig $adminCAP
-}
+Get-AdminRoleConfig $CAPMFAforAdmins | Out-Host
+
+Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength should use passwordless or phishing-resistant methods of MFA."
+Compare-AuthStrength $CAPAuthStrength | Out-Host
