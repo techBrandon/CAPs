@@ -3,11 +3,11 @@
 Reports on Conditional Access Policies
 .DESCRIPTION
 This script leverages Microsoft Graph PowerShell commands to report on Conditional Access Policies (CAPs) in a target tenant. 
-The account used to run this script must be delegated read-only permissions to CAPs as well as other Directory objects.
+The account used to run this script must be delegated read-only permissions to CAPs.
 This script will categorize tenant CAPs based on how they fit into Microsoft best practices.
 .NOTES
-Version: 1.2
-Updated: 20240821
+Version: 1.3
+Updated: 20250505
 Author: Brandon Colley
 Email: ColleyBrandon@pm.me
 #>
@@ -24,7 +24,7 @@ Connect-MgGraph -Scopes $graphScope
 # Gather all policy data to be parsed in script. Note, this will not include policies with preview features.
 [array]$ConditionalAccessPolicyArray = Get-MgIdentityConditionalAccessPolicy -All -Property *
 
-# Report on policy status
+# Report on high level policy status
 Write-Host -ForegroundColor DarkYellow "`nConditional Access Statistics"
 Write-Host $ConditionalAccessPolicyArray.count "Conditional Access policies are configured for the tenant"
 Write-Host ($ConditionalAccessPolicyArray | Where-Object DisplayName -like 'Microsoft-managed:*').count "are Microsoft Managed and are set to Report-only"
@@ -34,6 +34,37 @@ Write-Host ($ConditionalAccessPolicyArray | Where-Object state -eq disabled).cou
 
 Write-Host -ForegroundColor DarkYellow "`nAll Conditional Access Policies"
 $ConditionalAccessPolicyArray| Format-Table DisplayName,State,CreatedDateTime,ModifiedDateTime
+
+# Variables to distinguish and translate Authentication Strengths
+$PhishResist = @{
+    "windowsHelloForBusiness" = "Windows Hello For Business / Platform Credential"
+    "fido2" = "Passkeys (FIDO2)"
+    "x509CertificateMultiFactor" = "Certificate-based Authentication (Multifactor)"
+}
+$Passwordless = @{
+    "deviceBasedPush" = "Microsoft AUthenticator (Phone Sign-in)"
+}
+$Multifactor = @{
+    "temporaryAccessPassOneTime" = "Temporary Access Pass (One-time use)"
+    "temporaryAccessPassMultiUse" = "Temporary Access Pass (Multi-use)"
+    "password,microsoftAuthenticatorPush" = "Password + Microsoft Authenticator (Push Notifcation)"
+    "password,softwareOath" = "Password + Software OATH token"
+    "password,hardwareOath" = "Password + Hardware OATH token"
+    "password,sms" = "Password + SMS"
+    "password,voice" = "Password + Voice"
+    "federatedMultiFactor" = "Federated Multifactor"
+    "microsoftAuthenticatorPush,federatedSingleFactor" = "Federated Single factor + Microsoft Authenticator (Push Notification)"
+    "softwareOath,federatedSingleFactor" = "Federated Single factor + Software OATH token"
+    "hardwareOath,federatedSingleFactor" = "Federated Single factor + Hardware OATH token"
+    "sms,federatedSingleFactor" = "Federated Single factor + SMS"
+    "voice,federatedSingleFactor" = "Federated Single factor + Voice"
+}
+$Singlefactor = @{
+    "sms" = "SMS"
+    "password" = "Password"
+    "federatedSingleFactor" = "Federated Single factor"
+    "QRCodePin" = "QR code (Preview)"
+}
 
 # Stage arrays to be filled for each subsection category
 [array]$CAPBlockLegacyAccess = @()
@@ -144,26 +175,53 @@ function Compare-AuthStrength{
     param(
         $CAPSusingAuthStrength
     )
-    $strongMFA = @(
-        'fido2',
-        'windowsHelloForBusiness',
-        'x509CertificateMultiFactor',
-        'deviceBasedPush'
-    )
+    $strongMFA = $PhishResist + $Passwordless
+    #$strongMFA = @(
+    #    'fido2',
+    #    'windowsHelloForBusiness',
+    #    'x509CertificateMultiFactor',
+    #    'deviceBasedPush'
+    #)
     ForEach ($policy in $CAPSusingAuthStrength){
         $passFail = "Pass"
+        $phishCount = 0
+        $passwordlessCount = 0
+        $multifactorCount = 0
+        $singlefactorCount = 0
         ForEach ($authMethod in ($policy.GrantControls.AuthenticationStrength.AllowedCombinations)){
-            if($strongMFA -notcontains $authMethod){
+            if($strongMFA.Keys -notcontains $authMethod){
                 $passFail = "Fail"
+            }
+            if($PhishResist.Keys -contains $authMethod){
+                $phishCount ++
+            }
+            if($Passwordless.Keys -contains $authMethod){
+                $passwordlessCount ++
+            }
+            if($Multifactor.Keys -contains $authMethod){
+                $multifactorCount ++
+            }
+            if($Singlefactor.Keys -contains $authMethod){
+                $singlefactorCount ++
             }
         }
         $returnStrength = [PSCustomObject]@{
             CAP_Name = $policy.DisplayName
-            Number_of_Methods = $policy.GrantControls.AuthenticationStrength.AllowedCombinations.count
+            Total_Methods = $policy.GrantControls.AuthenticationStrength.AllowedCombinations.count
             Status = $passFail
+            PhishResistant = $phishCount
+            Passwordless = $passwordlessCount
+            Multifactor = $multifactorCount
+            Singlefactor = $singlefactorCount
         }
         $returnStrength
     }
+}
+
+function Get-AuthStrength{
+    param(
+        $CAPSusingAuthStrength
+    )
 }
 
 Write-Host -ForegroundColor DarkYellow "Categorize Policies:"
@@ -199,4 +257,7 @@ Write-Host -ForegroundColor Green "`nMFA Policies that target Admin roles should
 Get-AdminRoleConfig $CAPMFAforAdmins | Out-Host
 
 Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength should use passwordless or phishing-resistant methods of MFA."
-Compare-AuthStrength $CAPAuthStrength | Out-Host
+Compare-AuthStrength $CAPAuthStrength | Format-Table 
+
+#Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength - Report of configured Auth Methods for each policy."
+#Get-AuthStrength $CAPAuthStrength
