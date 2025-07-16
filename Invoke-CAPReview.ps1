@@ -81,6 +81,7 @@ $Singlefactor = @{
 [array]$CAPTargetAllResources = @()
 [array]$CAPSecureRegistration = @()
 [array]$CAPAuthStrength = @()
+[array]$CAPTargetRoles = @()
 
 ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     if((($CAPolicy.Conditions.ClientAppTypes -contains 'exchangeActiveSync') -or ($CAPolicy.Conditions.ClientAppTypes -contains 'other')) -and (($CAPolicy.Conditions.ClientAppTypes -notcontains 'browser') -and ($CAPolicy.Conditions.ClientAppTypes -notcontains 'mobileAppsAndDesktopClients')) -and ($CAPolicy.GrantControls.BuiltInControls -eq 'block')){
@@ -124,6 +125,9 @@ ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     }
     if($CAPolicy.GrantControls.AuthenticationStrength.Id){
         $CAPAuthStrength += $CAPolicy
+    }
+    if($CAPolicy.Conditions.Users.IncludeRoles -or $CAPolicy.Conditions.Users.ExcludeRoles){
+        $CAPTargetRoles += $CAPolicy
     }
 } 
 
@@ -218,10 +222,39 @@ function Compare-AuthStrength{
     }
 }
 
-function Get-AuthStrength{
+function Compare-RoleUsage{
     param(
-        $CAPSusingAuthStrength
+        $CAPusingRoles
     )
+    # Normalize list of roles, allowing proper grouping
+    ForEach ($policy in $CAPusingRoles){
+        if($policy.Conditions.Users.IncludeRoles){
+            # This section would include policies that both include and exclude which probably handle a different use case. May need to account for this separately.
+            $policy | Add-Member -NotePropertyName NormalizedRoles -NotePropertyValue ($policy.Conditions.Users.IncludeRoles | Sort-Object | Out-String).Trim()
+        }
+        elseif($policy.Conditions.Users.ExcludeRoles){
+            $policy | Add-Member -NotePropertyName NormalizedRoles -NotePropertyValue ($policy.Conditions.Users.ExcludeRoles | Sort-Object | Out-String).Trim()
+        }
+    }
+
+    # Break policies into groups sharing a matching list of roles
+    $RoleGroups = $CAPusingRoles | Group-Object -Property NormalizedRoles
+
+    ForEach ($group in $RoleGroups){
+        if($group.Count -eq $CAPusingRoles.count){
+            #test output
+            Write-Host "All $($group.Count) policies have matching roles!" -ForegroundColor Green
+        }
+        if($group.Count -eq 1){
+            #test output
+            Write-Host "$($group.Group[0].DisplayName) has set of roles unique only to this policy." -ForegroundColor Red
+        }
+        else {
+            #test output
+            $names = ($group.Group | ForEach-Object {$_.DisplayName}) -join ", "
+            Write-Host "$($group.Count) policies share the same set of roles: $names"
+        }
+    }
 }
 
 Write-Host -ForegroundColor DarkYellow "Categorize Policies:"
@@ -259,5 +292,5 @@ Get-AdminRoleConfig $CAPMFAforAdmins | Out-Host
 Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength should use passwordless or phishing-resistant methods of MFA."
 Compare-AuthStrength $CAPAuthStrength | Format-Table 
 
-#Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength - Report of configured Auth Methods for each policy."
-#Get-AuthStrength $CAPAuthStrength
+Write-Host -ForegroundColor Green "`nChecking all policies that include or exclude roles for uniformity."
+Compare-RoleUsage $CAPTargetRoles | Out-Host
