@@ -6,8 +6,8 @@ This script leverages Microsoft Graph PowerShell commands to report on Condition
 The account used to run this script must be delegated read-only permissions to CAPs.
 This script will categorize tenant CAPs based on how they fit into Microsoft best practices.
 .NOTES
-Version: 1.3
-Updated: 20250505
+Version: 1.4
+Updated: 20250821
 Author: Brandon Colley
 Email: ColleyBrandon@pm.me
 #>
@@ -113,7 +113,7 @@ ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     if($CAPolicy.Conditions.Applications.IncludeUserActions -like '*registerdevice*'){
         $CAPMFAforDeviceJoin += $CAPolicy
     }
-    if($CAPolicy.Conditions.AdditionalProperties.Values.Values -and $CAPolicy.GrantControls.BuiltInControls -eq 'block'){
+    if(($CAPolicy.Conditions.AdditionalProperties.Values.Values -or $CAPolicy.Conditions.AuthenticationFlows.TransferMethods) -and $CAPolicy.GrantControls.BuiltInControls -eq 'block'){
         $CAPBlockAuthFlow += $CAPolicy
     }
     if(($CAPolicy.Conditions.Applications.IncludeApplications -eq 'All') -and ($CAPolicy.Conditions.Users.IncludeUsers -contains 'All')){
@@ -176,12 +176,7 @@ function Compare-AuthStrength{
         $CAPSusingAuthStrength
     )
     $strongMFA = $PhishResist + $Passwordless
-    #$strongMFA = @(
-    #    'fido2',
-    #    'windowsHelloForBusiness',
-    #    'x509CertificateMultiFactor',
-    #    'deviceBasedPush'
-    #)
+
     ForEach ($policy in $CAPSusingAuthStrength){
         $passFail = "Pass"
         $phishCount = 0
@@ -218,12 +213,6 @@ function Compare-AuthStrength{
     }
 }
 
-function Get-AuthStrength{
-    param(
-        $CAPSusingAuthStrength
-    )
-}
-
 Write-Host -ForegroundColor DarkYellow "Categorize Policies:"
 Write-Host -ForegroundColor Green "`nPolicies that Block Legacy Authentication"
 $CAPBlockLegacyAccess.DisplayName
@@ -249,7 +238,7 @@ Write-Host -ForegroundColor Green "`nPolicies that block Authentication Flows"
 $CAPBlockAuthFlow.DisplayName
 Write-Host -ForegroundColor Green "`nPolicies that target All Resources and All Users"
 $CAPTargetAllResources.DisplayName
-Write-Host -ForegroundColor Green "`nPolicies that secure Secuirity Info Registration"
+Write-Host -ForegroundColor Green "`nPolicies that secure Security Info Registration"
 $CAPSecureRegistration.DisplayName
 
 Write-Host -ForegroundColor DarkYellow "`nChecking for Misconfigured CAPs"
@@ -258,6 +247,3 @@ Get-AdminRoleConfig $CAPMFAforAdmins | Out-Host
 
 Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength should use passwordless or phishing-resistant methods of MFA."
 Compare-AuthStrength $CAPAuthStrength | Format-Table 
-
-#Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength - Report of configured Auth Methods for each policy."
-#Get-AuthStrength $CAPAuthStrength
