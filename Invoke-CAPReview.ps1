@@ -6,34 +6,26 @@ This script leverages Microsoft Graph PowerShell commands to report on Condition
 The account used to run this script must be delegated read-only permissions to CAPs.
 This script will categorize tenant CAPs based on how they fit into Microsoft best practices.
 .NOTES
-Version: 1.4
-Updated: 20250821
+Version: 1.5
+Updated: 20250905
 Author: Brandon Colley
 Email: ColleyBrandon@pm.me
 #>
+
+param (
+    [ValidateSet("Json","Graph","Other")]
+    [string]$collectionType = "Graph",
+    $folderPath
+)
+
+###################
+## - VARIABLES - ##
+###################
 
 # Required Graph permissions to run this script.
 $graphScope = @(
 'Policy.Read.All' #Required to run: Get-MgIdentityConditionalAccessPolicy
 )
-
-# Prompt for and authenticate to tenant
-Write-Host -ForegroundColor Blue -BackgroundColor White 'Connecting to Graph using the existing token or by using the credentials selected in the logon prompt.'
-Connect-MgGraph -Scopes $graphScope
-
-# Gather all policy data to be parsed in script. Note, this will not include policies with preview features.
-[array]$ConditionalAccessPolicyArray = Get-MgIdentityConditionalAccessPolicy -All -Property *
-
-# Report on high level policy status
-Write-Host -ForegroundColor DarkYellow "`nConditional Access Statistics"
-Write-Host $ConditionalAccessPolicyArray.count "Conditional Access policies are configured for the tenant"
-Write-Host ($ConditionalAccessPolicyArray | Where-Object DisplayName -like 'Microsoft-managed:*').count "are Microsoft Managed and are set to Report-only"
-Write-Host ($ConditionalAccessPolicyArray | Where-Object state -eq enabled).count "are On (enabled)"
-Write-Host ($ConditionalAccessPolicyArray | Where-Object state -eq enabledForReportingButNotEnforced).count "are set to Report-only"
-Write-Host ($ConditionalAccessPolicyArray | Where-Object state -eq disabled).count "are Off (disabled)"
-
-Write-Host -ForegroundColor DarkYellow "`nAll Conditional Access Policies"
-$ConditionalAccessPolicyArray| Format-Table DisplayName,State,CreatedDateTime,ModifiedDateTime
 
 # Variables to distinguish and translate Authentication Strengths
 $PhishResist = @{
@@ -66,6 +58,180 @@ $Singlefactor = @{
     "QRCodePin" = "QR code (Preview)"
 }
 
+# Variables for role ID to name translation and identification
+$default14Roles = @(
+    '62e90394-69f5-4237-9190-012177145e10', # Global Administrator
+    'fe930be7-5e62-47db-91af-98c3a49a38b1', # User Administrator
+    '729827e3-9c14-49f7-bb1b-9608f156bbb8', # Helpdesk Administrator
+    'b0f54661-2d74-4c50-afa3-1ec803f12efe', # Billing Administrator
+    '29232cdf-9323-42fd-ade2-1d097af3e4de', # Exchange Administrator
+    'f28a1f50-f6e7-4571-818b-6a12f2af6b6c', # SharePoint Administrator
+    '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3', # Application Administrator
+    '194ae4cb-b126-40b2-bd5b-6091b380977d', # Security Administrator
+    'e8611ab8-c189-46e8-94e1-60213ab1f814', # Privileged Role Administrator
+    '158c047a-c907-4556-b7ef-446551a6b5f7', # Cloud Application Administrator
+    'b1be1c3e-b65d-4f19-8427-f6fa0d97feb9', # Conditional Access Administrator
+    'c4e39bd9-1100-46d3-8c65-fb160da0071f', # Authentication Administrator
+    '7be44c8a-adaf-4e2a-84d6-ab2649e08a13', # Privileged Authentication Administrator
+    '966707d0-3269-4727-9be2-8c3a10f19b9d'  # Password Administrator
+)
+
+####################
+## - DATA INPUT - ##
+####################
+
+switch ($collectionType) {
+    "Graph" {
+        Write-Host "Collecting data from Microsoft Graph..."
+        # Prompt for and authenticate to tenant
+        Write-Host 'Connecting to Graph using the existing token or by using the credentials selected in the logon prompt.'
+        Connect-MgGraph -Scopes $graphScope -NoWelcome
+
+        # Gather all policy data to be parsed in script. Note, this will not include policies with preview features.
+        [array]$ConditionalAccessPolicyArray = Get-MgIdentityConditionalAccessPolicy -All -Property *
+    }
+    "Json" {
+        Write-Host "Collecting JSON files..."
+        # If not provided on command line, prompt for folder path
+        if (-not $folderPath) {
+            $folderPath = Read-Host "Enter the full path to the folder containing JSON files."
+        }
+        [array]$ConditionalAccessPolicyArray = Get-ChildItem -Path $folderPath -Filter *.json | ForEach-Object {
+            Get-Content $_.FullName -Raw | ConvertFrom-Json
+        }
+    }
+    "Other" {
+        Write-Host "Collecting data from...NOWHERE...YET!"
+        [array]$ConditionalAccessPolicyArray = @()
+    }
+}
+
+###################
+## - FUNCTIONS - ##
+###################
+
+function Get-AdminRoleConfig{
+    param(
+        $CAPStargetingRoles
+    )
+
+    ForEach ($policy in $CAPStargetingRoles){
+        $defaultCount = 0
+        $nonDefaultCount = 0
+        $includeCount = 0
+        $includeCount = $policy.Conditions.Users.IncludeRoles.count
+        
+        ForEach ($role in ($policy.Conditions.Users.IncludeRoles)){
+            if($default14Roles -contains $role){
+                $defaultCount++
+            }
+            else{
+                $nonDefaultCount++
+            }
+        }
+        $returnAdmin = [PSCustomObject]@{
+            CAP_Name = $policy.DisplayName
+            Total_Roles = $includeCount
+            Default_Roles = "$defaultCount/14"
+            Additional_Roles = $nonDefaultCount
+        }
+        $returnAdmin
+    }
+}
+
+function Compare-AuthStrength{
+    param(
+        $CAPSusingAuthStrength
+    )
+
+    $strongMFA = $PhishResist + $Passwordless
+
+    ForEach ($policy in $CAPSusingAuthStrength){
+        $passFail = "Pass"
+        $phishCount = 0
+        $passwordlessCount = 0
+        $multifactorCount = 0
+        $singlefactorCount = 0
+        ForEach ($authMethod in ($policy.GrantControls.AuthenticationStrength.AllowedCombinations)){
+            if($strongMFA.Keys -notcontains $authMethod){
+                $passFail = "Fail"
+            }
+            if($PhishResist.Keys -contains $authMethod){
+                $phishCount ++
+            }
+            if($Passwordless.Keys -contains $authMethod){
+                $passwordlessCount ++
+            }
+            if($Multifactor.Keys -contains $authMethod){
+                $multifactorCount ++
+            }
+            if($Singlefactor.Keys -contains $authMethod){
+                $singlefactorCount ++
+            }
+        }
+        $returnStrength = [PSCustomObject]@{
+            CAP_Name = $policy.DisplayName
+            Total_Methods = $policy.GrantControls.AuthenticationStrength.AllowedCombinations.count
+            Status = $passFail
+            PhishResistant = $phishCount
+            Passwordless = $passwordlessCount
+            Multifactor = $multifactorCount
+            Singlefactor = $singlefactorCount
+        }
+        $returnStrength
+    }
+}
+
+function Compare-RoleUsage{
+    param(
+        $CAPusingRoles
+    )
+    # Normalize list of roles, allowing proper grouping
+    ForEach ($policy in $CAPusingRoles){
+        if($policy.Conditions.Users.IncludeRoles){
+            # This section would include policies that both include and exclude which probably handle a different use case. May need to account for this separately.
+            $policy | Add-Member -NotePropertyName NormalizedRoles -NotePropertyValue ($policy.Conditions.Users.IncludeRoles | Sort-Object | Out-String).Trim()
+        }
+        elseif($policy.Conditions.Users.ExcludeRoles){
+            $policy | Add-Member -NotePropertyName NormalizedRoles -NotePropertyValue ($policy.Conditions.Users.ExcludeRoles | Sort-Object | Out-String).Trim()
+        }
+    }
+
+    # Break policies into groups sharing a matching list of roles
+    $RoleGroups = $CAPusingRoles | Group-Object -Property NormalizedRoles
+
+    ForEach ($group in $RoleGroups){
+        if($group.Count -eq $CAPusingRoles.count){
+            #test output
+            Write-Host "All $($group.Count) policies have matching roles!" -ForegroundColor Green
+        }
+        if($group.Count -eq 1){
+            #test output
+            Write-Host "$($group.Group[0].DisplayName) has set of roles unique only to this policy." -ForegroundColor Red
+        }
+        else {
+            #test output
+            $names = ($group.Group | ForEach-Object {$_.DisplayName}) -join ", "
+            Write-Host "$($group.Count) policies share the same set of roles: $names"
+        }
+    }
+}
+
+##################
+## --- MAIN --- ##
+##################
+
+# Report on high level policy status
+Write-Host -ForegroundColor DarkYellow "`nConditional Access Statistics:"
+Write-Host $ConditionalAccessPolicyArray.count "Conditional Access policies are configured for the tenant"
+Write-Host ($ConditionalAccessPolicyArray | Where-Object DisplayName -like 'Microsoft-managed:*').count "are Microsoft Managed and are set to Report-only"
+Write-Host ($ConditionalAccessPolicyArray | Where-Object state -eq enabled).count "are On (enabled)"
+Write-Host ($ConditionalAccessPolicyArray | Where-Object state -eq enabledForReportingButNotEnforced).count "are set to Report-only"
+Write-Host ($ConditionalAccessPolicyArray | Where-Object state -eq disabled).count "are Off (disabled)"
+
+Write-Host -ForegroundColor DarkYellow "`nAll Conditional Access Policies:"
+$ConditionalAccessPolicyArray| Format-Table DisplayName,State,CreatedDateTime,ModifiedDateTime
+
 # Stage arrays to be filled for each subsection category
 [array]$CAPBlockLegacyAccess = @()
 [array]$CAPMFAforAdmins = @()
@@ -81,6 +247,7 @@ $Singlefactor = @{
 [array]$CAPTargetAllResources = @()
 [array]$CAPSecureRegistration = @()
 [array]$CAPAuthStrength = @()
+[array]$CAPTargetRoles = @()
 
 ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     if((($CAPolicy.Conditions.ClientAppTypes -contains 'exchangeActiveSync') -or ($CAPolicy.Conditions.ClientAppTypes -contains 'other')) -and (($CAPolicy.Conditions.ClientAppTypes -notcontains 'browser') -and ($CAPolicy.Conditions.ClientAppTypes -notcontains 'mobileAppsAndDesktopClients')) -and ($CAPolicy.GrantControls.BuiltInControls -eq 'block')){
@@ -125,93 +292,10 @@ ForEach ($CAPolicy in $ConditionalAccessPolicyArray){
     if($CAPolicy.GrantControls.AuthenticationStrength.Id){
         $CAPAuthStrength += $CAPolicy
     }
+    if($CAPolicy.Conditions.Users.IncludeRoles -or $CAPolicy.Conditions.Users.ExcludeRoles){
+        $CAPTargetRoles += $CAPolicy
+    }
 } 
-
-function Get-AdminRoleConfig{
-    param(
-        $CAPStargetingRoles
-    )
-    $default14Roles = @(
-        '62e90394-69f5-4237-9190-012177145e10', # Global Administrator
-        'fe930be7-5e62-47db-91af-98c3a49a38b1', # User Administrator
-        '729827e3-9c14-49f7-bb1b-9608f156bbb8', # Helpdesk Administrator
-        'b0f54661-2d74-4c50-afa3-1ec803f12efe', # Billing Administrator
-        '29232cdf-9323-42fd-ade2-1d097af3e4de', # Exchange Administrator
-        'f28a1f50-f6e7-4571-818b-6a12f2af6b6c', # SharePoint Administrator
-        '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3', # Application Administrator
-        '194ae4cb-b126-40b2-bd5b-6091b380977d', # Security Administrator
-        'e8611ab8-c189-46e8-94e1-60213ab1f814', # Privileged Role Administrator
-        '158c047a-c907-4556-b7ef-446551a6b5f7', # Cloud Application Administrator
-        'b1be1c3e-b65d-4f19-8427-f6fa0d97feb9', # Conditional Access Administrator
-        'c4e39bd9-1100-46d3-8c65-fb160da0071f', # Authentication Administrator
-        '7be44c8a-adaf-4e2a-84d6-ab2649e08a13', # Privileged Authentication Administrator
-        '966707d0-3269-4727-9be2-8c3a10f19b9d'  # Password Administrator
-    )
-    ForEach ($policy in $CAPStargetingRoles){
-        $defaultCount = 0
-        $nonDefaultCount = 0
-        $includeCount = 0
-        $includeCount = $policy.Conditions.Users.IncludeRoles.count
-        
-        ForEach ($role in ($policy.Conditions.Users.IncludeRoles)){
-            if($default14Roles -contains $role){
-                $defaultCount++
-            }
-            else{
-                $nonDefaultCount++
-            }
-        }
-        $returnAdmin = [PSCustomObject]@{
-            CAP_Name = $policy.DisplayName
-            Total_Roles = $includeCount
-            Default_Roles = "$defaultCount/14"
-            Additional_Roles = $nonDefaultCount
-        }
-        $returnAdmin
-    }
-}
-
-function Compare-AuthStrength{
-    param(
-        $CAPSusingAuthStrength
-    )
-    $strongMFA = $PhishResist + $Passwordless
-
-    ForEach ($policy in $CAPSusingAuthStrength){
-        $passFail = "Pass"
-        $phishCount = 0
-        $passwordlessCount = 0
-        $multifactorCount = 0
-        $singlefactorCount = 0
-        ForEach ($authMethod in ($policy.GrantControls.AuthenticationStrength.AllowedCombinations)){
-            if($strongMFA.Keys -notcontains $authMethod){
-                $passFail = "Fail"
-            }
-            if($PhishResist.Keys -contains $authMethod){
-                $phishCount ++
-            }
-            if($Passwordless.Keys -contains $authMethod){
-                $passwordlessCount ++
-            }
-            if($Multifactor.Keys -contains $authMethod){
-                $multifactorCount ++
-            }
-            if($Singlefactor.Keys -contains $authMethod){
-                $singlefactorCount ++
-            }
-        }
-        $returnStrength = [PSCustomObject]@{
-            CAP_Name = $policy.DisplayName
-            Total_Methods = $policy.GrantControls.AuthenticationStrength.AllowedCombinations.count
-            Status = $passFail
-            PhishResistant = $phishCount
-            Passwordless = $passwordlessCount
-            Multifactor = $multifactorCount
-            Singlefactor = $singlefactorCount
-        }
-        $returnStrength
-    }
-}
 
 Write-Host -ForegroundColor DarkYellow "Categorize Policies:"
 Write-Host -ForegroundColor Green "`nPolicies that Block Legacy Authentication"
@@ -241,9 +325,15 @@ $CAPTargetAllResources.DisplayName
 Write-Host -ForegroundColor Green "`nPolicies that secure Security Info Registration"
 $CAPSecureRegistration.DisplayName
 
-Write-Host -ForegroundColor DarkYellow "`nChecking for Misconfigured CAPs"
-Write-Host -ForegroundColor Green "`nMFA Policies that target Admin roles should include the 14 default roles and any other role the environment deems privileged."
+Write-Host -ForegroundColor DarkYellow "`nChecking for Misconfigured CAPs:"
+Write-Host -ForegroundColor Green "`nRecommendation for Authentication Strength usage"
+Write-Host "`nPolicies that enforce MFA should utilize Authentication Strengths instead of the old MFA grant control. Preferably, use passwordless or phishing-resistant methods of MFA."
+Compare-AuthStrength $CAPAuthStrength | Format-Table 
+
+Write-Host -ForegroundColor Green "`nRecommendations for Administrative Role usage"
+Write-Host "`nMFA Policies that target Admin roles should not only include the 14 default roles, they should also target any other role the environment deems as privileged."
 Get-AdminRoleConfig $CAPMFAforAdmins | Out-Host
 
-Write-Host -ForegroundColor Green "`nMFA Policies that utilize Authentication Strength should use passwordless or phishing-resistant methods of MFA."
-Compare-AuthStrength $CAPAuthStrength | Format-Table 
+Write-Host "`nPolicies that include or exclude Entra roles should be applied uniformly. All roles treated as privileged should be targeted in all Admin policies."
+Write-Host "Any policy that excludes roles should have a matching policy that includes the roles. These must be updated whenever roles are added/removed.`n"
+Compare-RoleUsage $CAPTargetRoles | Out-Host
